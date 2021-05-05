@@ -92,69 +92,211 @@ interface IBEP20 {
 }
 
 /**
- * Multiple administrators interface:
+ * @dev Multiple administrators interface:
  * - Checks requiring all administrators to sign N times before executing functions
  * - Alive signatures: in case an admin does not execute any functions in X days they will be removed from admins, this is to avoid locking the signatures
  */
 contract Administrable{
-    uint constant expirationDays = 60;  // Days after which an admin is removed automatically if it does not execute any function
-    address[] private admins;
-  
+    uint constant expirationDays = 60;          // Days after which an admin is marked as inactive if it does not execute any function
+    uint constant signatureMinutes = 5;         // Duration of an admin signature in minutes, after which it will expire and will need to be signed again
+    uint constant signatureSetsMinutes = 10;    // Duration of an admins signature set in minutes, after which it will expire and will need to be validated again
+    
+    mapping (address => bool) private adminsMap;
+    address[] private adminsList;
+    mapping (address => uint) private adminsLastActivity;
+    mapping (address => uint) private adminsSignatures;
+    uint adminsSignaturesSets = 0;          // Times all the admins signed together, this is used for stronger actions which require all the admins signing together twice, three times, ...
+    uint adminsSignaturesSetsCreation = 0;  // Time at which the last signature set was created
+    
     event AddedAdministrator(address indexed admin);    // Called when a new admin is nominated
     event RemovedAdministrator(address indexed admin);  // Called when an admin is removed
     event ExpiredAdministrator(address indexed admin);  // Called when an admin does not execute any function for 'expirationDays' days and gets removed automatically
 
+
     /**
-    * @dev Initializes the contract setting the deployer as the initial owner.
-    */
-    constructor () internal {
-        address msgSender = _msgSender();
-        _owner = msgSender;
-        emit OwnershipTransferred(address(0), msgSender);
+     * @dev Add the contract creator as the first admin
+     */
+    constructor () internal{
+        _addAdmin(msg.sender);
     }
     
     /**
-    * @dev Returns the address of the current owner.
-    */
-    function owner() public view returns (address) {
-    return _owner;
+     * @dev Returns the addresses of the current admins.
+     */
+    function admins() public view returns (address[]){
+        return adminsList;
     }
     
     /**
-    * @dev Throws if called by any account other than the owner.
-    */
-    modifier onlyOwner() {
-    require(_owner == _msgSender(), "Ownable: caller is not the owner");
-    _;
+     * @dev Returns the number of current admins.
+     */
+    function adminsNumber() public view returns (uint){
+        return adminsList.length;
     }
     
     /**
-    * @dev Leaves the contract without owner. It will not be possible to call
-    * `onlyOwner` functions anymore. Can only be called by the current owner.
-    *
-    * NOTE: Renouncing ownership will leave the contract without an owner,
-    * thereby removing any functionality that is only available to the owner.
-    */
-    function renounceOwnership() public onlyOwner {
-    emit OwnershipTransferred(_owner, address(0));
-    _owner = address(0);
+     * @dev Checks if a given user is an admin
+     */
+    function isAdmin(address user) public view returns (bool){
+        return adminsMap[user];
     }
     
     /**
-    * @dev Transfers ownership of the contract to a new account (`newOwner`).
-    * Can only be called by the current owner.
-    */
-    function transferOwnership(address newOwner) public onlyOwner {
-    _transferOwnership(newOwner);
+     * @dev Adds an admin to the list and the map
+     */
+    function _addAdmin(address user) internal{
+        adminsList.push(user);
+        adminsMap[user] = true;
+        adminsLastActivity[user] = now;
+        emit AddedAdministrator(user);
     }
     
     /**
-    * @dev Transfers ownership of the contract to a new account (`newOwner`).
-    */
-    function _transferOwnership(address newOwner) internal {
-    require(newOwner != address(0), "Ownable: new owner is the zero address");
-    emit OwnershipTransferred(_owner, newOwner);
-    _owner = newOwner;
+     * @dev Removes an admin from the list and the map
+     */
+    function _removeAdmin(address admin) internal{
+        // Delete the admin from the map
+        adminsMap[admin] = false;
+        
+        // Delete the admin from the list
+        for(uint i = 0; i < adminsList.length; i++){
+            if(adminsList[i] == admin){
+                // Copy the last key to the current and shorten the array length by one
+                adminsList[i] = adminsList[adminsList.length-1];
+                adminsList.length--;
+                emit RemovedAdministrator(admin);
+                return;
+            }
+        }
+    }
+    
+    /**
+     * @dev Throws if called by any account other than admins, also updates last activity at the end
+     */
+    modifier requireAdmin(){
+        // Check if the user is an admin
+        require(isAdmin(msg.sender), "Administrable: caller is not an admin");
+        
+        // Execute function
+        _;
+        
+        // Update last activity to now
+        adminsLastActivity[msg.sender] = now;
+    }
+    
+    /**
+     * @dev Returns the number of times the admins signed together
+     */
+    function adminSignatureSets() public view returns (uint){
+        return adminsSignaturesSets;
+    }
+    
+    /**
+     * @dev Deletes all the signatures
+     */
+    function _resetSignatures() internal{
+        // Reset all the signatures
+        for(uint i = 0; i < adminsList.length; i++){
+            adminsSignatures[adminsList[i]] = 0;
+        }
+    }
+    
+    /**
+     * @dev Deletes all the signatures and resets any previous sets
+     */
+    function _resetSignaturesAndSets() internal{
+        // Reset the sets
+        adminsSignaturesSets = 0;
+        
+        // Reset all the signatures
+        _resetSignatures();
+    }
+    
+    /**
+     * @dev Puts an admin signature to allow calling function requiring all admins signatures
+     */
+    function adminSign() public requireAdmin{
+        // Check if the admin already signed
+        require(adminsSignatures[msg.sender] < now - signatureMinutes * 1 minutes, "Administrable: the admin already signed");
+        
+        // Update the signature
+        adminsSignatures[msg.sender] = now;
+    }
+    
+    /**
+     * @dev Checks all the admins signatures and creates a new set if all valid, this should be called when more than 1 set is needed
+     */
+    function adminValidateSignatures() public requireAdmin{
+        // Check all the admin signatures
+        for(uint i = 0; i < adminsList.length; i++){
+            require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
+        }
+        
+        // Check that the previous set has not expired (if any), and update time
+        if(adminsSignaturesSets > 0 && adminsSignaturesSetsCreation < now - signatureSetsMinutes * 1 minutes)
+            adminsSignaturesSets = 1;
+        else
+            adminsSignaturesSets++;
+        adminsSignaturesSetsCreation = now;
+        
+        // Reset the signatures, to allow signing again
+        _resetSignatures();
+    }
+    
+    /**
+     * @dev Throws if there are admin signatures or sets missing
+     */
+    modifier requireAdminSignatureSets(uint sets){
+        // Check if any previous signature sets expired
+        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= now - signatureSetsMinutes * 1 minutes), "Administrable: missing signature sets or expired signature sets");
+        
+        // If we are missing a signature set check all the admin signatures
+        if(adminsSignaturesSets == sets-1){
+            for(uint i = 0; i < adminsList.length; i++){
+                require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
+            }
+        }
+        
+        // Execute function
+        _;
+        
+        // Reset the signatures and sets
+        _resetSignaturesAndSets();
+    }
+    
+    /**
+     * @dev Checks if all the active admins signed, inactive admins are the ones who didn't execute any function for 'expirationDays' days
+     */
+    modifier requireActiveAdminSignatures(){
+        // Check if any previous signature sets expired
+        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= now - signatureSetsMinutes * 1 minutes), "Administrable: missing signature sets or expired signature sets");
+        
+        // If we are missing a signature set check all the admin signatures
+        if(adminsSignaturesSets == sets-1){
+            for(uint i = 0; i < adminsList.length; i++){
+                require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
+            }
+        }
+        
+        // Execute function
+        _;
+        
+        // Reset the signatures and sets
+        _resetSignaturesAndSets();
+    }
+    
+    /**
+     * @dev Add a new admin
+     */
+    function addAdmin(address user) public requireAdminSignatureSets(1){
+        _addAdmin(user);
+    }
+    
+    /**
+     * @dev Remove an existing admin
+     */
+    function addAdmin(address user) public requireAdminSignatureSets(1){
+        _addAdmin(user);
     }
 }
 
