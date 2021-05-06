@@ -1,4 +1,5 @@
 //pragma solidity 0.8.0;
+//SPDX-License-Identifier: UNLICENSED
     
 interface IBEP20 {
     /**
@@ -96,34 +97,47 @@ interface IBEP20 {
  * - Checks requiring all administrators to sign N times before executing functions
  * - Alive signatures: in case an admin does not execute any functions in X days they will be removed from admins, this is to avoid locking the signatures
  */
-contract Administrable{
-    uint constant expirationDays = 60;          // Days after which an admin is marked as inactive if it does not execute any function
-    uint constant signatureMinutes = 5;         // Duration of an admin signature in minutes, after which it will expire and will need to be signed again
-    uint constant signatureSetsMinutes = 10;    // Duration of an admins signature set in minutes, after which it will expire and will need to be validated again
+abstract contract Administrable{
+    uint256 constant adminExpiration = 60 days;             // Time after which an admin is marked as inactive if it does not execute any function
+    uint256 constant signatureExpiration = 5 minutes;       // Duration of an admin signature, after which it will expire and will need to be signed again
+    uint256 constant signatureSetExpiration = 10 minutes;   // Duration of an admins signature set, after which it will expire and will need to be validated again
     
     mapping (address => bool) private adminsMap;
-    address[] private adminsList;
-    mapping (address => uint) private adminsLastActivity;
-    mapping (address => uint) private adminsSignatures;
-    uint adminsSignaturesSets = 0;          // Times all the admins signed together, this is used for stronger actions which require all the admins signing together twice, three times, ...
-    uint adminsSignaturesSetsCreation = 0;  // Time at which the last signature set was created
+    address[] internal adminsList;
+    mapping (address => uint256) private adminsLastActivity;
+    mapping (address => uint256) private adminsSignatures;
+    uint8 adminsSignaturesSets = 0;             // Times all the admins signed together, this is used for stronger actions which require all the admins signing together twice, three times, ...
+    uint256 adminsSignaturesSetsCreation = 0;   // Time at which the last signature set was created
+    
+    bool _contractLocked = false;
     
     event AddedAdministrator(address indexed admin);    // Called when a new admin is nominated
     event RemovedAdministrator(address indexed admin);  // Called when an admin is removed
-    event ExpiredAdministrator(address indexed admin);  // Called when an admin does not execute any function for 'expirationDays' days and gets removed automatically
 
 
     /**
      * @dev Add the contract creator as the first admin
      */
-    constructor () internal{
+    constructor (){
         _addAdmin(msg.sender);
+    }
+    
+    /**
+     * @dev Returns true if the contract is locked and cannot be interacted with
+     */
+    function isLocked() external view returns (bool){
+        return _contractLocked;
+    }
+    
+    modifier notLocked(){
+        require(!_contractLocked, "Administrable: contract locked");
+        _;
     }
     
     /**
      * @dev Returns the addresses of the current admins.
      */
-    function admins() public view returns (address[]){
+    function admins() public view returns (address[] memory){
         return adminsList;
     }
     
@@ -147,7 +161,7 @@ contract Administrable{
     function _addAdmin(address user) internal{
         adminsList.push(user);
         adminsMap[user] = true;
-        adminsLastActivity[user] = now;
+        adminsLastActivity[user] = block.timestamp;
         emit AddedAdministrator(user);
     }
     
@@ -163,7 +177,7 @@ contract Administrable{
             if(adminsList[i] == admin){
                 // Copy the last key to the current and shorten the array length by one
                 adminsList[i] = adminsList[adminsList.length-1];
-                adminsList.length--;
+                adminsList.pop();
                 emit RemovedAdministrator(admin);
                 return;
             }
@@ -181,7 +195,7 @@ contract Administrable{
         _;
         
         // Update last activity to now
-        adminsLastActivity[msg.sender] = now;
+        adminsLastActivity[msg.sender] = block.timestamp;
     }
     
     /**
@@ -215,29 +229,36 @@ contract Administrable{
     /**
      * @dev Puts an admin signature to allow calling function requiring all admins signatures
      */
-    function adminSign() public requireAdmin{
+    function adminSign() public notLocked requireAdmin{
         // Check if the admin already signed
-        require(adminsSignatures[msg.sender] < now - signatureMinutes * 1 minutes, "Administrable: the admin already signed");
+        require(adminsSignatures[msg.sender] < block.timestamp - signatureExpiration, "Administrable: the admin already signed");
         
         // Update the signature
-        adminsSignatures[msg.sender] = now;
+        adminsSignatures[msg.sender] = block.timestamp;
+    }
+    
+    /**
+     * @dev Checks if all admins signed
+     */
+    function _checkSignatures() internal view{
+        for(uint i = 0; i < adminsList.length; i++){
+            require(adminsSignatures[adminsList[i]] >= block.timestamp - signatureExpiration, "Administrable: not all admins signed or some signatures expired");
+        }
     }
     
     /**
      * @dev Checks all the admins signatures and creates a new set if all valid, this should be called when more than 1 set is needed
      */
-    function adminValidateSignatures() public requireAdmin{
+    function adminValidateSignatures() public notLocked requireAdmin{
         // Check all the admin signatures
-        for(uint i = 0; i < adminsList.length; i++){
-            require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
-        }
+        _checkSignatures();
         
         // Check that the previous set has not expired (if any), and update time
-        if(adminsSignaturesSets > 0 && adminsSignaturesSetsCreation < now - signatureSetsMinutes * 1 minutes)
+        if(adminsSignaturesSets > 0 && adminsSignaturesSetsCreation < block.timestamp - signatureSetExpiration)
             adminsSignaturesSets = 1;
         else
             adminsSignaturesSets++;
-        adminsSignaturesSetsCreation = now;
+        adminsSignaturesSetsCreation = block.timestamp;
         
         // Reset the signatures, to allow signing again
         _resetSignatures();
@@ -248,35 +269,11 @@ contract Administrable{
      */
     modifier requireAdminSignatureSets(uint sets){
         // Check if any previous signature sets expired
-        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= now - signatureSetsMinutes * 1 minutes), "Administrable: missing signature sets or expired signature sets");
+        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= block.timestamp - signatureSetExpiration), "Administrable: missing signature sets or expired signature sets");
         
         // If we are missing a signature set check all the admin signatures
-        if(adminsSignaturesSets == sets-1){
-            for(uint i = 0; i < adminsList.length; i++){
-                require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
-            }
-        }
-        
-        // Execute function
-        _;
-        
-        // Reset the signatures and sets
-        _resetSignaturesAndSets();
-    }
-    
-    /**
-     * @dev Checks if all the active admins signed, inactive admins are the ones who didn't execute any function for 'expirationDays' days
-     */
-    modifier requireActiveAdminSignatures(){
-        // Check if any previous signature sets expired
-        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= now - signatureSetsMinutes * 1 minutes), "Administrable: missing signature sets or expired signature sets");
-        
-        // If we are missing a signature set check all the admin signatures
-        if(adminsSignaturesSets == sets-1){
-            for(uint i = 0; i < adminsList.length; i++){
-                require(adminsSignatures[adminsList[i]] >= now - signatureMinutes * 1 minutes, "Administrable: not all admins signed or some signatures expired");
-            }
-        }
+        if(adminsSignaturesSets == sets-1)
+            _checkSignatures();
         
         // Execute function
         _;
@@ -288,19 +285,34 @@ contract Administrable{
     /**
      * @dev Add a new admin
      */
-    function addAdmin(address user) public requireAdminSignatureSets(1){
+    function addAdmin(address user) public notLocked requireAdmin requireAdminSignatureSets(1){
         _addAdmin(user);
     }
     
     /**
-     * @dev Remove an existing admin
+     * @dev Remove an existing admin, this checks for admin signatures excluding inactive admins, this prevents getting stuck if some admin lost access to their keys
      */
-    function addAdmin(address user) public requireAdminSignatureSets(1){
-        _addAdmin(user);
+    function removeAdmin(address admin) public notLocked requireAdmin{
+        // Check all the admin signatures, except the expired ones
+        for(uint i = 0; i < adminsList.length; i++){
+            require(adminsLastActivity[adminsList[i]] < block.timestamp - adminExpiration || adminsSignatures[adminsList[i]] >= block.timestamp - signatureExpiration, "Administrable: not all admins signed or some signatures expired");
+        }
+        
+        _removeAdmin(admin);
+        
+        // Reset the signatures and sets
+        _resetSignaturesAndSets();
+    }
+    
+    /**
+     * @dev Permanently disables the contract, leaving only read-only interactions available
+     */
+    function lockContract() public notLocked requireAdmin requireAdminSignatureSets(3){
+        _contractLocked = true;
     }
 }
 
-contract StoneToken is IBEP20, Ownable {
+contract StoneToken is IBEP20, Administrable {
   mapping (address => uint256) private _balances;
 
   mapping (address => mapping (address => uint256)) private _allowances;
@@ -309,56 +321,56 @@ contract StoneToken is IBEP20, Ownable {
   uint8 private _decimals;
   string private _symbol;
   string private _name;
+  
+  bool private _canMint = true;
 
-  constructor() public {
-    _name = {{TOKEN_NAME}};
-    _symbol = {{TOKEN_SYMBOL}};
-    _decimals = {{DECIMALS}};
-    _totalSupply = {{TOTAL_SUPPLY}};
-    _balances[msg.sender] = _totalSupply;
-
-    emit Transfer(address(0), msg.sender, _totalSupply);
+  constructor() {
+    _name = "Stone Token";
+    _symbol = "STONE";
+    _decimals = 2;
+    _totalSupply = 0;
   }
 
   /**
    * @dev Returns the bep token owner.
    */
-  function getOwner() external view returns (address) {
-    return owner();
+  function getOwner() override external view returns (address) {
+    // The named owner will be the first admin, this is required by the BEP-20 standard
+    return admins()[0];
   }
 
   /**
    * @dev Returns the token decimals.
    */
-  function decimals() external view returns (uint8) {
+  function decimals() override external view returns (uint8) {
     return _decimals;
   }
 
   /**
    * @dev Returns the token symbol.
    */
-  function symbol() external view returns (string memory) {
+  function symbol() override external view returns (string memory) {
     return _symbol;
   }
 
   /**
   * @dev Returns the token name.
   */
-  function name() external view returns (string memory) {
+  function name() override external view returns (string memory) {
     return _name;
   }
 
   /**
    * @dev See {BEP20-totalSupply}.
    */
-  function totalSupply() external view returns (uint256) {
+  function totalSupply() override external view returns (uint256) {
     return _totalSupply;
   }
 
   /**
    * @dev See {BEP20-balanceOf}.
    */
-  function balanceOf(address account) external view returns (uint256) {
+  function balanceOf(address account) override external view returns (uint256) {
     return _balances[account];
   }
 
@@ -370,15 +382,15 @@ contract StoneToken is IBEP20, Ownable {
    * - `recipient` cannot be the zero address.
    * - the caller must have a balance of at least `amount`.
    */
-  function transfer(address recipient, uint256 amount) external returns (bool) {
-    _transfer(_msgSender(), recipient, amount);
+  function transfer(address recipient, uint256 amount) override external notLocked returns (bool) {
+    _transfer(msg.sender, recipient, amount);
     return true;
   }
 
   /**
    * @dev See {BEP20-allowance}.
    */
-  function allowance(address owner, address spender) external view returns (uint256) {
+  function allowance(address owner, address spender) override external view returns (uint256) {
     return _allowances[owner][spender];
   }
 
@@ -389,8 +401,8 @@ contract StoneToken is IBEP20, Ownable {
    *
    * - `spender` cannot be the zero address.
    */
-  function approve(address spender, uint256 amount) external returns (bool) {
-    _approve(_msgSender(), spender, amount);
+  function approve(address spender, uint256 amount) override external notLocked returns (bool) {
+    _approve(msg.sender, spender, amount);
     return true;
   }
 
@@ -406,9 +418,10 @@ contract StoneToken is IBEP20, Ownable {
    * - the caller must have allowance for `sender`'s tokens of at least
    * `amount`.
    */
-  function transferFrom(address sender, address recipient, uint256 amount) external returns (bool) {
+  function transferFrom(address sender, address recipient, uint256 amount) override external notLocked returns (bool) {
     _transfer(sender, recipient, amount);
-    _approve(sender, _msgSender(), _allowances[sender][_msgSender()].sub(amount, "BEP20: transfer amount exceeds allowance"));
+    require(_allowances[sender][msg.sender] >= amount, "BEP20: transfer amount exceeds allowance");
+    _approve(sender, msg.sender, _allowances[sender][msg.sender] - amount);
     return true;
   }
 
@@ -424,8 +437,8 @@ contract StoneToken is IBEP20, Ownable {
    *
    * - `spender` cannot be the zero address.
    */
-  function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
-    _approve(_msgSender(), spender, _allowances[_msgSender()][spender].add(addedValue));
+  function increaseAllowance(address spender, uint256 addedValue) public notLocked returns (bool) {
+    _approve(msg.sender, spender, _allowances[msg.sender][spender] + addedValue);
     return true;
   }
 
@@ -443,22 +456,41 @@ contract StoneToken is IBEP20, Ownable {
    * - `spender` must have allowance for the caller of at least
    * `subtractedValue`.
    */
-  function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
-    _approve(_msgSender(), spender, _allowances[_msgSender()][spender].sub(subtractedValue, "BEP20: decreased allowance below zero"));
+  function decreaseAllowance(address spender, uint256 subtractedValue) public notLocked returns (bool) {
+    _approve(msg.sender, spender, _allowances[msg.sender][spender] - subtractedValue);
     return true;
   }
-
+  
   /**
-   * @dev Creates `amount` tokens and assigns them to `msg.sender`, increasing
-   * the total supply.
-   *
-   * Requirements
-   *
-   * - `msg.sender` must be the token owner
+   * @dev Returns true if more tokens can be minted, false if it is locked
    */
-  function mint(uint256 amount) public onlyOwner returns (bool) {
-    _mint(_msgSender(), amount);
+  function canMint() external view returns (bool){
+      return _canMint;
+  }
+  
+  /**
+   * @dev Permanently disables minting of new token
+   */
+  function disableMinting() external notLocked requireAdmin requireAdminSignatureSets(2){
+      _canMint = false;
+  }
+  
+  /**
+   * @dev Creates `amount` tokens and assigns them to `recipient`, increasing
+   * the total supply. This requires 1 signature set from admins
+   */
+  function mint(address recipient, uint256 amount) public notLocked requireAdmin requireAdminSignatureSets(1) returns (bool) {
+    require(_canMint, "Token minting locked");
+    _mint(recipient, amount);
     return true;
+  }
+  
+  /**
+   * @dev Burns `amount` tokens from `msg.sender`
+   */
+  function burn(uint256 amount) public notLocked returns (bool){
+      _burn(msg.sender, amount);
+      return true;
   }
 
   /**
@@ -478,9 +510,10 @@ contract StoneToken is IBEP20, Ownable {
   function _transfer(address sender, address recipient, uint256 amount) internal {
     require(sender != address(0), "BEP20: transfer from the zero address");
     require(recipient != address(0), "BEP20: transfer to the zero address");
-
-    _balances[sender] = _balances[sender].sub(amount, "BEP20: transfer amount exceeds balance");
-    _balances[recipient] = _balances[recipient].add(amount);
+    
+    require(_balances[sender] >= amount, "BEP20: transfer amount exceeds balance");
+    _balances[sender] = _balances[sender] - amount;
+    _balances[recipient] = _balances[recipient] + amount;
     emit Transfer(sender, recipient, amount);
   }
 
@@ -496,8 +529,8 @@ contract StoneToken is IBEP20, Ownable {
   function _mint(address account, uint256 amount) internal {
     require(account != address(0), "BEP20: mint to the zero address");
 
-    _totalSupply = _totalSupply.add(amount);
-    _balances[account] = _balances[account].add(amount);
+    _totalSupply = _totalSupply + amount;
+    _balances[account] = _balances[account] + amount;
     emit Transfer(address(0), account, amount);
   }
 
@@ -515,8 +548,9 @@ contract StoneToken is IBEP20, Ownable {
   function _burn(address account, uint256 amount) internal {
     require(account != address(0), "BEP20: burn from the zero address");
 
-    _balances[account] = _balances[account].sub(amount, "BEP20: burn amount exceeds balance");
-    _totalSupply = _totalSupply.sub(amount);
+    require(_balances[account] >= amount, "BEP20: burn amount exceeds balance");
+    _balances[account] = _balances[account] - amount;
+    _totalSupply = _totalSupply - amount;
     emit Transfer(account, address(0), amount);
   }
 
@@ -539,16 +573,5 @@ contract StoneToken is IBEP20, Ownable {
 
     _allowances[owner][spender] = amount;
     emit Approval(owner, spender, amount);
-  }
-
-  /**
-   * @dev Destroys `amount` tokens from `account`.`amount` is then deducted
-   * from the caller's allowance.
-   *
-   * See {_burn} and {_approve}.
-   */
-  function _burnFrom(address account, uint256 amount) internal {
-    _burn(account, amount);
-    _approve(account, _msgSender(), _allowances[account][_msgSender()].sub(amount, "BEP20: burn amount exceeds allowance"));
   }
 }
