@@ -94,23 +94,25 @@ interface IBEP20 {
 
 /**
  * @dev Multiple administrators interface:
- * - Checks requiring all administrators to sign N times before executing functions
- * - Alive signatures: in case an admin does not execute any functions in X days they will be marked as inactive, this is to avoid locking the signatures in case some admin loses its keys
+ * - Checks requiring a percentage of administrators to sign N times before executing functions
+ * - Alive signatures: in case an admin does not execute any function in X days they will be marked as inactive, this is to avoid locking the signatures in case some admin loses its keys
  */
 abstract contract Administrable{
-    uint256 constant adminExpiration = 60 days;             // Time after which an admin is marked as inactive if it does not execute any function
-    uint256 constant signatureExpiration = 5 minutes;       // Duration of an admin signature, after which it will expire and will need to be signed again
-    uint256 constant signatureSetExpiration = 10 minutes;   // Duration of an admins signature set, after which it will expire and will need to be validated again
+    uint8 constant _percentageSignatures = 66;              // Percentage of admins required to sign
+    uint256 constant _adminExpiration = 60 days;            // Time after which an admin is marked as inactive if it does not execute any function
+    uint256 constant _signatureExpiration = 5 minutes;      // Duration of an admin signature, after which it will expire and will need to be signed again
+    uint256 constant _signatureSetExpiration = 10 minutes;  // Duration of an admins signature set, after which it will expire and will need to be validated again
     
-    mapping (address => bool) private adminsMap;
-    address[] internal adminsList;
-    mapping (address => uint256) private adminsLastActivity;
-    uint8 adminsSignaturesCause;    // 1 = add admin, 2 = remove admin, 3 = lock contract, other values depend on implementation
-    mapping (address => uint256) private adminsSignatures;
-    uint8 adminsSignaturesSets = 0;             // Times all the admins signed together, this is used for stronger actions which require all the admins signing together twice, three times, ...
-    uint256 adminsSignaturesSetsCreation = 0;   // Time at which the last signature set was created
+    mapping (address => bool) internal _adminsMap;              // Map of admins, for fast check
+    address[] internal _adminsList;                             // Array of admins, for iteration
+    mapping (address => uint256) internal _adminsLastActivity;  // Last time an admin has called a function: admin => timestamp
+    uint8 internal _adminsSignaturesCause;                      // Cause for which the admins are currently signing: 1 = add admin, 2 = remove admin, 3 = lock contract, other values depend on implementation
+    address internal _adminSignaturesTarget;                    // User to add/remove from admins, used for signing causes 1 or 2
+    mapping (address => uint256) internal _adminsSignatures;    // Admins signature time: admin => timestamp
+    uint8 internal _adminsSignaturesSets = 0;                   // Times all the admins signed together, this is used for stronger actions which require all the admins signing together twice, three times, ...
+    uint256 internal _adminsSignaturesSetsCreation = 0;         // Timestamp of the last signature set creation
     
-    bool _contractLocked = false;
+    bool internal _contractLocked = false;  // If true, the contract can be no longer executed, only reading functions are available
     
     event AddedAdministrator(address indexed admin);    // Called when a new admin is nominated
     event RemovedAdministrator(address indexed admin);  // Called when an admin is removed
@@ -131,215 +133,70 @@ abstract contract Administrable{
     }
     
     /**
-     * @dev Throws if the contract is locked
-     */
-    modifier notLocked(){
-        require(!_contractLocked, "Administrable: contract locked");
-        _;
-    }
-    
-    /**
      * @dev Returns the addresses of the current admins.
      */
-    function admins() public view returns (address[] memory){
-        return adminsList;
+    function adminsList() external view returns (address[] memory){
+        return _adminsList;
     }
     
     /**
      * @dev Returns the number of current admins.
      */
-    function adminsNumber() public view returns (uint){
-        return adminsList.length;
+    function adminsNumber() external view returns (uint){
+        return _adminsList.length;
     }
     
     /**
      * @dev Checks if a given user is an admin
      */
-    function isAdmin(address user) public view returns (bool){
-        return adminsMap[user];
+    function isAdmin(address user) external view returns (bool){
+        return _adminsMap[user];
     }
     
     /**
-     * @dev Adds an admin to the list and the map
+     * @dev Checks if a given admin is active
      */
-    function _addAdmin(address user) internal{
-        require(!adminsMap[user], "Administrable: user is already admin");
-        adminsList.push(user);
-        adminsMap[user] = true;
-        adminsLastActivity[user] = block.timestamp;
-        emit AddedAdministrator(user);
-    }
-    
-    /**
-     * @dev Removes an admin from the list and the map
-     */
-    function _removeAdmin(address admin) internal{
-        // Delete the admin from the map
-        adminsMap[admin] = false;
-        
-        // Delete the admin from the list
-        for(uint i = 0; i < adminsList.length; i++){
-            if(adminsList[i] == admin){
-                // Copy the last key to the current and shorten the array length by one
-                adminsList[i] = adminsList[adminsList.length-1];
-                adminsList.pop();
-                emit RemovedAdministrator(admin);
-                return;
-            }
-        }
-    }
-    
-    /**
-     * @dev Throws if called by any account other than admins, also updates last activity at the end
-     */
-    modifier requireAdmin(){
-        // Check if the user is an admin
-        require(isAdmin(msg.sender), "Administrable: caller is not an admin");
-        
-        // Execute function
-        _;
-        
-        // Update last activity to now
-        adminsLastActivity[msg.sender] = block.timestamp;
-    }
-    
-    /**
-     * @dev Retrieves the admins signatures cause
-     */
-    function adminSignaturesCause() external view returns (uint8){
-        return adminsSignaturesCause;
-    }
-    
-    /**
-     * @dev Throws if there is at least a signature set or at least one signature
-     */
-    modifier notSigned(){
-        // Check that there are no signatures sets active
-        require(adminsSignaturesSets == 0 || adminsSignaturesSetsCreation < block.timestamp - signatureSetExpiration, "Administrable: one or more admin signatures sets are active");
-        
-        // Check that no signature is available
-        for(uint i = 0; i < adminsList.length; i++){
-            require(adminsSignatures[adminsList[i]] < block.timestamp - signatureExpiration, "Administrable: some admin signatures are active");
-        }
-        
-        _;
-    }
-    
-    /**
-     * @dev Changes the admins signatures cause if there are no signatures already
-     */
-    function adminSetSignaturesCause(uint8 cause) external notLocked requireAdmin notSigned{
-        adminsSignaturesCause = cause;
-        //_resetSignaturesAndSets();
-    }
-    
-    /**
-     * @dev Returns the number of times the admins signed together
-     */
-    function adminSignatureSets() public view returns (uint){
-        return adminsSignaturesSets;
-    }
-    
-    /**
-     * @dev Deletes all the signatures
-     */
-    function _resetSignatures() internal{
-        // Reset all the signatures
-        for(uint i = 0; i < adminsList.length; i++){
-            adminsSignatures[adminsList[i]] = 0;
-        }
-    }
-    
-    /**
-     * @dev Deletes all the signatures and resets any previous sets
-     */
-    function _resetSignaturesAndSets() internal{
-        // Reset the sets
-        adminsSignaturesSets = 0;
-        
-        // Reset all the signatures
-        _resetSignatures();
-    }
-    
-    /**
-     * @dev Puts an admin signature to allow calling function requiring all admins signatures
-     */
-    function adminSign() public notLocked requireAdmin{
-        // Check if the admin already signed
-        require(adminsSignatures[msg.sender] < block.timestamp - signatureExpiration, "Administrable: the admin already signed");
-        
-        // Update the signature
-        adminsSignatures[msg.sender] = block.timestamp;
-    }
-    
-    /**
-     * @dev Checks if all admins signed
-     */
-    function _checkSignatures() internal view{
-        for(uint i = 0; i < adminsList.length; i++){
-            require(adminsSignatures[adminsList[i]] >= block.timestamp - signatureExpiration, "Administrable: not all admins signed or some signatures expired");
-        }
-    }
-    
-    /**
-     * @dev Checks all the admins signatures and creates a new set if all valid, this should be called when more than 1 set is needed
-     */
-    function adminValidateSignatures() public notLocked requireAdmin{
-        // Check all the admin signatures
-        _checkSignatures();
-        
-        // Check that the previous set has not expired (if any), and update time
-        if(adminsSignaturesSets > 0 && adminsSignaturesSetsCreation < block.timestamp - signatureSetExpiration)
-            adminsSignaturesSets = 1;
-        else
-            adminsSignaturesSets++;
-        adminsSignaturesSetsCreation = block.timestamp;
-        
-        // Reset the signatures, to allow signing again
-        _resetSignatures();
-    }
-    
-    /**
-     * @dev Throws if there are admin signatures or sets missing
-     */
-    modifier requireAdminSignatureSets(uint sets, uint cause){
-        // Check if the cause corresponds to the cause being signed
-        require(cause == adminsSignaturesCause, "Administrable: signature cause does not correspond to the function cause");
-        
-        // Check if any previous signature sets expired
-        require(sets == 1 || (adminsSignaturesSets >= sets-1 && adminsSignaturesSetsCreation >= block.timestamp - signatureSetExpiration), "Administrable: missing signature sets or expired signature sets");
-        
-        // If we are missing a signature set check all the admin signatures
-        if(adminsSignaturesSets == sets-1)
-            _checkSignatures();
-        
-        // Execute function
-        _;
-        
-        // Reset the signatures and sets
-        _resetSignaturesAndSets();
+    function isAdminActive(address admin) external view returns (bool){
+        require(_adminsMap[admin], "Administrable: passed user is not admin");
+        return (_adminsLastActivity[admin] >= block.timestamp - _adminExpiration);
     }
     
     /**
      * @dev Add a new admin
      */
-    function addAdmin(address user) public notLocked requireAdmin requireAdminSignatureSets(1, 1){
-        _addAdmin(user);
+    function addAdmin() external notLocked requireAdmin requireAdminSignatureSets(1, 1){
+        require(!_adminsMap[_adminSignaturesTarget], "Administrable: user is already admin");
+        _addAdmin(_adminSignaturesTarget);
     }
     
     /**
      * @dev Remove an existing admin, this checks for admin signatures excluding inactive admins, this prevents getting stuck if some admin lost access to their keys
+     * To remove an inactive admin the required percentage is calculated on the remaining active admins, to remove an active admin the percentage is calculated on the total number of admins
      */
-    function removeAdmin(address admin) public notLocked requireAdmin{
+    function removeAdmin() external notLocked requireAdmin{
         // Check if the cause corresponds to the cause being signed
-        require(2 == adminsSignaturesCause, "Administrable: signature cause does not correspond to the function cause");
+        require(2 == _adminsSignaturesCause, "Administrable: signature cause does not correspond to the function cause");
         
-        // Check all the admin signatures, except the expired ones
-        for(uint i = 0; i < adminsList.length; i++){
-            require(adminsLastActivity[adminsList[i]] < block.timestamp - adminExpiration || adminsSignatures[adminsList[i]] >= block.timestamp - signatureExpiration, "Administrable: not all admins signed or some signatures expired");
+        // Check all the admin signatures, except the inactive ones
+        uint16 activeAdmins = 0;
+        uint16 signatures = 0;
+        for(uint i = 0; i < _adminsList.length; i++){
+            // Check if the admin is active
+            if(_adminsLastActivity[_adminsList[i]] >= block.timestamp - _adminExpiration){
+                activeAdmins++;
+                
+                // Check if it signed
+                if(_adminsSignatures[_adminsList[i]] >= block.timestamp - _signatureExpiration)
+                    signatures++;
+            }
         }
         
-        _removeAdmin(admin);
+        // Check if we have a minimum amount of signatures
+        require(activeAdmins > 0, "Administrable: all admins are inactive or haven't signed");
+        require(signatures >= (((_adminsLastActivity[_adminSignaturesTarget] >= block.timestamp - _adminExpiration ? _adminsList.length : activeAdmins) * _percentageSignatures) + 50) / 100, "Administrable: not all admins signed or some signatures expired");
+        
+        // Remove the admin
+        _removeAdmin(_adminSignaturesTarget);
         
         // Reset the signatures and sets
         _resetSignaturesAndSets();
@@ -351,10 +208,213 @@ abstract contract Administrable{
     function lockContract() public notLocked requireAdmin requireAdminSignatureSets(3, 3){
         _contractLocked = true;
     }
+    
+    /**
+     * @dev Retrieves the admins signatures cause
+     */
+    function adminSignaturesCause() external view returns (uint8){
+        return _adminsSignaturesCause;
+    }
+    
+    /**
+     * @dev Changes the admins signatures cause if there are no signatures already
+     */
+    function adminSetSignaturesCause(uint8 cause) external notLocked requireAdmin notSigned{
+        _adminsSignaturesCause = cause;
+        //_resetSignaturesAndSets();
+    }
+    
+    /**
+     * @dev Retrieves the user that will be targeted in the next admin signatures
+     */
+    function adminSignaturesTarget() external view returns (address){
+        return _adminSignaturesTarget;
+    }
+    
+    /**
+     * @dev Changes the admins signatures target if there are no signatures already
+     */
+    function adminSetSignaturesTarget(address user) external notLocked requireAdmin notSigned{
+        _adminSignaturesTarget = user;
+        //_resetSignaturesAndSets();
+    }
+    
+    /**
+     * @dev Returns the number of times the admins signed together
+     */
+    function adminSignatureSets() external view returns (uint8){
+        return _adminsSignaturesSets;
+    }
+    
+    /**
+     * @dev Puts an admin signature to allow calling function requiring all admins signatures
+     */
+    function adminSign() public notLocked requireAdmin{
+        // Check if the admin already signed
+        require(_adminsSignatures[msg.sender] < block.timestamp - _signatureExpiration, "Administrable: the admin already signed");
+        
+        // Update the signature
+        _adminsSignatures[msg.sender] = block.timestamp;
+    }
+    
+    /**
+     * @dev Checks if all admins signed
+     */
+    function checkSignatures() external view returns (bool){
+        return _checkSignatures();
+    }
+    
+    /**
+     * @dev Checks all the admins signatures and creates a new set if all valid, this should be called when more than 1 set is needed
+     */
+    function adminValidateSignatures() public notLocked requireAdmin{
+        // Check all the admin signatures
+        require(_checkSignatures(), "Administrable: not all admins signed or some signatures expired");
+        
+        // Check that the previous set has not expired (if any), and update time
+        if(_adminsSignaturesSets > 0 && _adminsSignaturesSetsCreation < block.timestamp - _signatureSetExpiration)
+            _adminsSignaturesSets = 1;
+        else
+            _adminsSignaturesSets++;
+        _adminsSignaturesSetsCreation = block.timestamp;
+        
+        // Reset the signatures, to allow signing again
+        _resetSignatures();
+    }
+    
+    
+    /**
+     * @dev Throws if the contract is locked
+     */
+    modifier notLocked(){
+        require(!_contractLocked, "Administrable: contract locked");
+        _;
+    }
+    
+    /**
+     * @dev Throws if called by any account other than admins, also updates last activity at the end
+     */
+    modifier requireAdmin(){
+        // Check if the user is an admin
+        require(_adminsMap[msg.sender], "Administrable: caller is not an admin");
+        
+        // Execute function
+        _;
+        
+        // Update last activity to now
+        _adminsLastActivity[msg.sender] = block.timestamp;
+    }
+    
+    /**
+     * @dev Throws if there is at least a signature set or at least one signature
+     */
+    modifier notSigned(){
+        // Check that there are no signatures sets active
+        require(_adminsSignaturesSets == 0 || _adminsSignaturesSetsCreation < block.timestamp - _signatureSetExpiration, "Administrable: one or more admin signatures sets are active");
+        
+        // Check that no signature is available
+        for(uint i = 0; i < _adminsList.length; i++){
+            require(_adminsSignatures[_adminsList[i]] < block.timestamp - _signatureExpiration, "Administrable: one or more admin signatures are active");
+        }
+        
+        _;
+    }
+    
+    /**
+     * @dev Throws if there are admin signatures or sets missing
+     */
+    modifier requireAdminSignatureSets(uint sets, uint cause){
+        // Check if the cause corresponds to the cause being signed
+        require(cause == _adminsSignaturesCause, "Administrable: signature cause does not correspond to the function cause");
+        
+        // Check if any previous signature sets expired
+        require(sets == 1 || (_adminsSignaturesSets >= sets-1 && _adminsSignaturesSetsCreation >= block.timestamp - _signatureSetExpiration), "Administrable: missing signature sets or expired signature sets");
+        
+        // If we are missing a signature set check all the admin signatures
+        if(_adminsSignaturesSets == sets-1)
+            require(_checkSignatures(), "Administrable: not all admins signed or some signatures expired");
+        
+        // Execute function
+        _;
+        
+        // Reset the signatures and sets
+        _resetSignaturesAndSets();
+    }
+    
+    
+    /**
+     * @dev Adds an admin to the list and the map
+     */
+    function _addAdmin(address user) internal{
+        _adminsList.push(user);
+        _adminsMap[user] = true;
+        _adminsLastActivity[user] = block.timestamp;
+        emit AddedAdministrator(user);
+    }
+    
+    /**
+     * @dev Removes an admin from the list and the map
+     */
+    function _removeAdmin(address admin) internal{
+        // Delete the admin from the map
+        _adminsMap[admin] = false;
+        
+        // Delete the admin from the list
+        for(uint i = 0; i < _adminsList.length; i++){
+            if(_adminsList[i] == admin){
+                // Copy the last key to the current and shorten the array length by one
+                _adminsList[i] = _adminsList[_adminsList.length-1];
+                _adminsList.pop();
+                emit RemovedAdministrator(admin);
+                return;
+            }
+        }
+    }
+    
+    /**
+     * @dev Checks if all admins signed
+     */
+    function _checkSignatures() internal view returns (bool){
+        // Retrieve the number of required admins
+        uint16 minAdmins = ((uint16(_adminsList.length) * _percentageSignatures) + 50) / 100;
+        
+        // Check the signatures
+        uint16 signatures = 0;
+        for(uint i = 0; i < _adminsList.length; i++){
+            if(_adminsSignatures[_adminsList[i]] >= block.timestamp - _signatureExpiration){
+                signatures++;
+                if(signatures >= minAdmins)
+                    return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /**
+     * @dev Deletes all the signatures
+     */
+    function _resetSignatures() internal{
+        // Reset all the signatures
+        for(uint i = 0; i < _adminsList.length; i++){
+            _adminsSignatures[_adminsList[i]] = 0;
+        }
+    }
+    
+    /**
+     * @dev Deletes all the signatures and resets any previous sets
+     */
+    function _resetSignaturesAndSets() internal{
+        // Reset the sets
+        _adminsSignaturesSets = 0;
+        
+        // Reset all the signatures
+        _resetSignatures();
+    }
 }
 
 contract StoneToken is IBEP20, Administrable {
-  //uint8 adminsSignaturesCause;    // 4 = mint, 5 = disable minting
+  //uint8 _adminsSignaturesCause;   // 4 = mint, 5 = disable minting
     
   mapping (address => uint256) private _balances;
 
@@ -365,11 +425,11 @@ contract StoneToken is IBEP20, Administrable {
   string private _symbol;
   string private _name;
   
-  uint256 constant mintSize = 30; 
+  uint256 constant _mintSize = 30; 
   bool private _canMint = true;
-  address[mintSize] _mintAddresses;
+  address[_mintSize] _mintAddresses;
   uint256 _mintAddressesLength;
-  uint256[mintSize] _mintAmounts;
+  uint256[_mintSize] _mintAmounts;
   uint256 _mintAmountsLength;
 
   constructor() {
@@ -384,7 +444,7 @@ contract StoneToken is IBEP20, Administrable {
    */
   function getOwner() override external view returns (address) {
     // The named owner will be the first admin, this is required by the BEP-20 standard
-    return admins()[0];
+    return _adminsList[0];
   }
 
   /**
@@ -485,7 +545,7 @@ contract StoneToken is IBEP20, Administrable {
    *
    * - `spender` cannot be the zero address.
    */
-  function increaseAllowance(address spender, uint256 addedValue) public notLocked returns (bool) {
+  function increaseAllowance(address spender, uint256 addedValue) external notLocked returns (bool) {
     _approve(msg.sender, spender, _allowances[msg.sender][spender] + addedValue);
     return true;
   }
@@ -504,7 +564,7 @@ contract StoneToken is IBEP20, Administrable {
    * - `spender` must have allowance for the caller of at least
    * `subtractedValue`.
    */
-  function decreaseAllowance(address spender, uint256 subtractedValue) public notLocked returns (bool) {
+  function decreaseAllowance(address spender, uint256 subtractedValue) external notLocked returns (bool) {
     _approve(msg.sender, spender, _allowances[msg.sender][spender] - subtractedValue);
     return true;
   }
@@ -517,15 +577,15 @@ contract StoneToken is IBEP20, Administrable {
   }
   
   /**
-   * @dev Permanently disables minting of new token
+   * @dev Permanently disables minting of new tokens
    */
   function disableMinting() external notLocked requireAdmin requireAdminSignatureSets(2, 5){
       _canMint = false;
   }
   
   /**
-     * @dev Throws if minting is locked
-     */
+   * @dev Throws if minting is locked
+   */
   modifier mintingEnabled(){
       require(_canMint, "Token minting locked");
       _;
@@ -535,9 +595,8 @@ contract StoneToken is IBEP20, Administrable {
    * @dev Reads the addresses list for minting
    */
   function mintAddresses() external view returns (address[] memory){
-      uint256 length = (_mintAddressesLength < _mintAmountsLength ? _mintAddressesLength : _mintAmountsLength);
-      address[] memory out = new address[](length);
-      for(uint i = 0; i < length; i++){
+      address[] memory out = new address[](_mintAddressesLength);
+      for(uint i = 0; i < _mintAddressesLength; i++){
           out[i] = _mintAddresses[i];
       }
       return out;
@@ -546,8 +605,8 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Sets the addresses list for minting
    */
-  function mintSetAddresses(address[] memory addresses) public notLocked requireAdmin mintingEnabled notSigned returns (bool) {
-    _mintAddressesLength = (mintSize < addresses.length ? mintSize : addresses.length);
+  function mintSetAddresses(address[] memory addresses) external notLocked requireAdmin mintingEnabled notSigned returns (bool) {
+    _mintAddressesLength = (_mintSize < addresses.length ? _mintSize : addresses.length);
     for(uint i = 0; i < _mintAddressesLength; i++){
       _mintAddresses[i] = addresses[i];
     }
@@ -558,9 +617,8 @@ contract StoneToken is IBEP20, Administrable {
    * @dev Reads the amounts list for minting
    */
   function mintAmounts() external view returns (uint256[] memory){
-      uint256 length = (_mintAddressesLength < _mintAmountsLength ? _mintAddressesLength : _mintAmountsLength);
-      uint256[] memory out = new uint256[](length);
-      for(uint i = 0; i < length; i++){
+      uint256[] memory out = new uint256[](_mintAmountsLength);
+      for(uint i = 0; i < _mintAmountsLength; i++){
           out[i] = _mintAmounts[i];
       }
       return out;
@@ -581,8 +639,8 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Sets the amounts list for minting
    */
-  function mintSetAmounts(uint256[] memory amounts) public notLocked requireAdmin mintingEnabled notSigned returns (bool) {
-    _mintAmountsLength = (mintSize < amounts.length ? mintSize : amounts.length);
+  function mintSetAmounts(uint256[] memory amounts) external notLocked requireAdmin mintingEnabled notSigned returns (bool) {
+    _mintAmountsLength = (_mintSize < amounts.length ? _mintSize : amounts.length);
     for(uint i = 0; i < _mintAmountsLength; i++){
       _mintAmounts[i] = amounts[i];
     }
@@ -592,7 +650,7 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Creates tokens based on the previously loaded addresses and amounts. This requires 1 signature set from admins
    */
-  function mint() public notLocked requireAdmin mintingEnabled requireAdminSignatureSets(1, 4) returns (bool) {
+  function mint() external notLocked requireAdmin mintingEnabled requireAdminSignatureSets(1, 4) returns (bool) {
     // Min length
     uint256 length = (_mintAddressesLength < _mintAmountsLength ? _mintAddressesLength : _mintAmountsLength);
     for(uint i = 0; i < length; i++){
@@ -604,7 +662,7 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Burns `amount` tokens from `msg.sender`
    */
-  function burn(uint256 amount) public notLocked returns (bool){
+  function burn(uint256 amount) external notLocked returns (bool){
       _burn(msg.sender, amount);
       return true;
   }
