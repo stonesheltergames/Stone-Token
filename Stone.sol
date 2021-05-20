@@ -156,7 +156,7 @@ abstract contract Administrable{
     /**
      * @dev Checks if a given admin is active
      */
-    function isAdminActive(address admin) external view returns (bool){
+    function isAdminActive(address admin) external requireAdminReadOnly view returns (bool){
         require(_adminsMap[admin], "Administrable: passed user is not admin");
         return (_adminsLastActivity[admin] >= block.timestamp - _adminExpiration);
     }
@@ -212,7 +212,7 @@ abstract contract Administrable{
     /**
      * @dev Retrieves the admins signatures cause
      */
-    function adminSignaturesCause() external view returns (uint8){
+    function adminSignaturesCause() external view requireAdminReadOnly returns (uint8){
         return _adminsSignaturesCause;
     }
     
@@ -227,7 +227,7 @@ abstract contract Administrable{
     /**
      * @dev Retrieves the user that will be targeted in the next admin signatures
      */
-    function adminSignaturesTarget() external view returns (address){
+    function adminSignaturesTarget() external view requireAdminReadOnly returns (address){
         return _adminSignaturesTarget;
     }
     
@@ -242,7 +242,7 @@ abstract contract Administrable{
     /**
      * @dev Returns the number of times the admins signed together
      */
-    function adminSignatureSets() external view returns (uint8){
+    function adminSignatureSets() external view requireAdminReadOnly returns (uint8){
         return _adminsSignaturesSets;
     }
     
@@ -260,14 +260,14 @@ abstract contract Administrable{
     /**
      * @dev Checks if all admins signed
      */
-    function checkSignatures() external view returns (bool){
+    function checkSignatures() external view requireAdminReadOnly returns (bool){
         return _checkSignatures();
     }
     
     /**
      * @dev Checks all the admins signatures and creates a new set if all valid, this should be called when more than 1 set is needed
      */
-    function adminValidateSignatures() public notLocked requireAdmin{
+    function adminValidateSignatures() external notLocked requireAdmin{
         // Check all the admin signatures
         require(_checkSignatures(), "Administrable: not all admins signed or some signatures expired");
         
@@ -303,6 +303,17 @@ abstract contract Administrable{
         
         // Update last activity to now
         _adminsLastActivity[msg.sender] = block.timestamp;
+    }
+    
+    /**
+     * @dev Throws if called by any account other than admins
+     */
+    modifier requireAdminReadOnly(){
+        // Check if the user is an admin
+        require(_adminsMap[msg.sender], "Administrable: caller is not an admin");
+        
+        // Execute function
+        _;
     }
     
     /**
@@ -425,12 +436,9 @@ contract StoneToken is IBEP20, Administrable {
   string private _symbol;
   string private _name;
   
-  uint256 constant _mintSize = 30; 
   bool private _canMint = true;
-  address[_mintSize] _mintAddresses;
-  uint256 _mintAddressesLength;
-  uint256[_mintSize] _mintAmounts;
-  uint256 _mintAmountsLength;
+  address[] _mintAddresses;
+  uint256[] _mintAmounts;
 
   constructor() {
     _name = "Stone Token";
@@ -594,41 +602,30 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Reads the addresses list for minting
    */
-  function mintAddresses() external view returns (address[] memory){
-      address[] memory out = new address[](_mintAddressesLength);
-      for(uint i = 0; i < _mintAddressesLength; i++){
-          out[i] = _mintAddresses[i];
-      }
-      return out;
+  function mintAddresses() external view requireAdminReadOnly returns (address[] memory){
+      return _mintAddresses;
   }
   
   /**
    * @dev Sets the addresses list for minting
    */
   function mintSetAddresses(address[] memory addresses) external notLocked requireAdmin mintingEnabled notSigned returns (bool) {
-    _mintAddressesLength = (_mintSize < addresses.length ? _mintSize : addresses.length);
-    for(uint i = 0; i < _mintAddressesLength; i++){
-      _mintAddresses[i] = addresses[i];
-    }
+    _mintAddresses = addresses;
     return true;
   }
   
   /**
    * @dev Reads the amounts list for minting
    */
-  function mintAmounts() external view returns (uint256[] memory){
-      uint256[] memory out = new uint256[](_mintAmountsLength);
-      for(uint i = 0; i < _mintAmountsLength; i++){
-          out[i] = _mintAmounts[i];
-      }
-      return out;
+  function mintAmounts() external view requireAdminReadOnly returns (uint256[] memory){
+      return _mintAmounts;
   }
   
   /**
    * @dev Calculates the total amount to be minted
    */
-  function mintTotalAmount() external view returns (uint256){
-      uint256 length = (_mintAddressesLength < _mintAmountsLength ? _mintAddressesLength : _mintAmountsLength);
+  function mintTotalAmount() external view requireAdminReadOnly returns (uint256){
+      uint256 length = (_mintAddresses.length < _mintAmounts.length ? _mintAddresses.length : _mintAmounts.length);
       uint256 total = 0;
       for(uint i = 0; i < length; i++){
           total = total + _mintAmounts[i];
@@ -640,10 +637,7 @@ contract StoneToken is IBEP20, Administrable {
    * @dev Sets the amounts list for minting
    */
   function mintSetAmounts(uint256[] memory amounts) external notLocked requireAdmin mintingEnabled notSigned returns (bool) {
-    _mintAmountsLength = (_mintSize < amounts.length ? _mintSize : amounts.length);
-    for(uint i = 0; i < _mintAmountsLength; i++){
-      _mintAmounts[i] = amounts[i];
-    }
+    _mintAmounts = amounts;
     return true;
   }
   
@@ -652,7 +646,7 @@ contract StoneToken is IBEP20, Administrable {
    */
   function mint() external notLocked requireAdmin mintingEnabled requireAdminSignatureSets(1, 4) returns (bool) {
     // Min length
-    uint256 length = (_mintAddressesLength < _mintAmountsLength ? _mintAddressesLength : _mintAmountsLength);
+    uint256 length = (_mintAddresses.length < _mintAmounts.length ? _mintAddresses.length : _mintAmounts.length);
     for(uint i = 0; i < length; i++){
         _mint(_mintAddresses[i], _mintAmounts[i]);
     }
