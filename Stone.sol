@@ -1,4 +1,4 @@
-//pragma solidity 0.8.0;
+pragma solidity 0.8.0;
 //SPDX-License-Identifier: UNLICENSED
     
 interface IBEP20 {
@@ -156,7 +156,7 @@ abstract contract Administrable{
     /**
      * @dev Checks if a given admin is active
      */
-    function isAdminActive(address admin) external requireAdminReadOnly view returns (bool){
+    function isAdminActive(address admin) external view returns (bool){
         require(_adminsMap[admin], "Administrable: passed user is not admin");
         return (_adminsLastActivity[admin] >= block.timestamp - _adminExpiration);
     }
@@ -212,7 +212,7 @@ abstract contract Administrable{
     /**
      * @dev Retrieves the admins signatures cause
      */
-    function adminSignaturesCause() external view requireAdminReadOnly returns (uint8){
+    function adminSignaturesCause() external view returns (uint8){
         return _adminsSignaturesCause;
     }
     
@@ -227,7 +227,7 @@ abstract contract Administrable{
     /**
      * @dev Retrieves the user that will be targeted in the next admin signatures
      */
-    function adminSignaturesTarget() external view requireAdminReadOnly returns (address){
+    function adminSignaturesTarget() external view returns (address){
         return _adminSignaturesTarget;
     }
     
@@ -242,7 +242,7 @@ abstract contract Administrable{
     /**
      * @dev Returns the number of times the admins signed together
      */
-    function adminSignatureSets() external view requireAdminReadOnly returns (uint8){
+    function adminSignatureSets() external view returns (uint8){
         return _adminsSignaturesSets;
     }
     
@@ -260,7 +260,7 @@ abstract contract Administrable{
     /**
      * @dev Checks if all admins signed
      */
-    function checkSignatures() external view requireAdminReadOnly returns (bool){
+    function checkSignatures() external view returns (bool){
         return _checkSignatures();
     }
     
@@ -303,17 +303,6 @@ abstract contract Administrable{
         
         // Update last activity to now
         _adminsLastActivity[msg.sender] = block.timestamp;
-    }
-    
-    /**
-     * @dev Throws if called by any account other than admins
-     */
-    modifier requireAdminReadOnly(){
-        // Check if the user is an admin
-        require(_adminsMap[msg.sender], "Administrable: caller is not an admin");
-        
-        // Execute function
-        _;
     }
     
     /**
@@ -535,8 +524,8 @@ contract StoneToken is IBEP20, Administrable {
    * `amount`.
    */
   function transferFrom(address sender, address recipient, uint256 amount) override external notLocked returns (bool) {
-    _transfer(sender, recipient, amount);
     require(_allowances[sender][msg.sender] >= amount, "BEP20: transfer amount exceeds allowance");
+    _transfer(sender, recipient, amount);
     _approve(sender, msg.sender, _allowances[sender][msg.sender] - amount);
     return true;
   }
@@ -602,7 +591,7 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Reads the addresses list for minting
    */
-  function mintAddresses() external view requireAdminReadOnly returns (address[] memory){
+  function mintAddresses() external view returns (address[] memory){
       return _mintAddresses;
   }
   
@@ -617,14 +606,14 @@ contract StoneToken is IBEP20, Administrable {
   /**
    * @dev Reads the amounts list for minting
    */
-  function mintAmounts() external view requireAdminReadOnly returns (uint256[] memory){
+  function mintAmounts() external view returns (uint256[] memory){
       return _mintAmounts;
   }
   
   /**
    * @dev Calculates the total amount to be minted
    */
-  function mintTotalAmount() external view requireAdminReadOnly returns (uint256){
+  function mintTotalAmount() external view returns (uint256){
       uint256 length = (_mintAddresses.length < _mintAmounts.length ? _mintAddresses.length : _mintAmounts.length);
       uint256 total = 0;
       for(uint i = 0; i < length; i++){
@@ -648,7 +637,8 @@ contract StoneToken is IBEP20, Administrable {
     // Min length
     uint256 length = (_mintAddresses.length < _mintAmounts.length ? _mintAddresses.length : _mintAmounts.length);
     for(uint i = 0; i < length; i++){
-        _mint(_mintAddresses[i], _mintAmounts[i]);
+        if(_mintAmounts[i] > 0)
+            _mint(_mintAddresses[i], _mintAmounts[i]);
     }
     return true;
   }
